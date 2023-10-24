@@ -6,13 +6,25 @@ import (
 	"testing"
 )
 
-func TestUpload(t *testing.T) {
-	client, err := NewClientWithConfig("fdfs.conf")
+var client *Client
+
+func TestMain(m *testing.M) {
+	fmt.Println("start")
+	var err error
+	client, err = NewClient(WithMaxConns(10), WithTrackerAddr([]string{
+		"192.168.1.223:22122",
+	}))
 	defer client.Destory()
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
+	m.Run()
+	defer client.Destory()
+	fmt.Println("end")
+}
+
+func TestUpload(t *testing.T) {
 	fileId, err := client.UploadByFilename("client_test.go")
 	if err != nil {
 		fmt.Println(err.Error())
@@ -35,12 +47,6 @@ func TestUpload(t *testing.T) {
 }
 
 func TestUploadFile100(t *testing.T) {
-	client, err := NewClientWithConfig("fdfs.conf")
-	defer client.Destory()
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
 	var wg sync.WaitGroup
 	for i := 0; i != 100; i++ {
 		wg.Add(1)
@@ -66,12 +72,6 @@ func TestUploadFile100(t *testing.T) {
 }
 
 func TestUploadBuffer100(t *testing.T) {
-	client, err := NewClientWithConfig("fdfs.conf")
-	defer client.Destory()
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
 	var wg sync.WaitGroup
 	for i := 0; i != 100; i++ {
 		wg.Add(1)

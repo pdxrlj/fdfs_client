@@ -13,6 +13,20 @@ type Client struct {
 	config          *config
 }
 
+type ClientConfig func(*config)
+
+func WithTrackerAddr(trackerAddr []string) ClientConfig {
+	return func(c *config) {
+		c.trackerAddr = trackerAddr
+	}
+}
+
+func WithMaxConns(maxConns int) ClientConfig {
+	return func(c *config) {
+		c.maxConns = maxConns
+	}
+}
+
 func NewClientWithConfig(configName string) (*Client, error) {
 	config, err := newConfig(configName)
 	if err != nil {
@@ -36,26 +50,49 @@ func NewClientWithConfig(configName string) (*Client, error) {
 	return client, nil
 }
 
-func (this *Client) Destory() {
-	if this == nil {
+func NewClient(options ...ClientConfig) (*Client, error) {
+	dc := defaultConfig()
+	for _, option := range options {
+		option(dc)
+	}
+
+	client := &Client{
+		config:          dc,
+		storagePoolLock: &sync.RWMutex{},
+	}
+	client.trackerPools = make(map[string]*connPool)
+	client.storagePools = make(map[string]*connPool)
+
+	for _, addr := range dc.trackerAddr {
+		trackerPool, err := newConnPool(addr, dc.maxConns)
+		if err != nil {
+			return nil, err
+		}
+		client.trackerPools[addr] = trackerPool
+	}
+	return client, nil
+}
+
+func (c *Client) Destory() {
+	if c == nil {
 		return
 	}
-	for _, pool := range this.trackerPools {
+	for _, pool := range c.trackerPools {
 		pool.Destory()
 	}
-	for _, pool := range this.storagePools {
+	for _, pool := range c.storagePools {
 		pool.Destory()
 	}
 }
 
-func (this *Client) UploadByFilename(fileName string) (string, error) {
+func (c *Client) UploadByFilename(fileName string) (string, error) {
 	fileInfo, err := newFileInfo(fileName, nil, "")
 	defer fileInfo.Close()
 	if err != nil {
 		return "", err
 	}
 
-	storageInfo, err := this.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_STORE_WITHOUT_GROUP_ONE, "", "")
+	storageInfo, err := c.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_STORE_WITHOUT_GROUP_ONE, "", "")
 	if err != nil {
 		return "", err
 	}
@@ -65,19 +102,19 @@ func (this *Client) UploadByFilename(fileName string) (string, error) {
 	task.fileInfo = fileInfo
 	task.storagePathIndex = storageInfo.storagePathIndex
 
-	if err := this.doStorage(task, storageInfo); err != nil {
+	if err := c.doStorage(task, storageInfo); err != nil {
 		return "", err
 	}
 	return task.fileId, nil
 }
 
-func (this *Client) UploadByBuffer(buffer []byte, fileExtName string) (string, error) {
+func (c *Client) UploadByBuffer(buffer []byte, fileExtName string) (string, error) {
 	fileInfo, err := newFileInfo("", buffer, fileExtName)
 	defer fileInfo.Close()
 	if err != nil {
 		return "", err
 	}
-	storageInfo, err := this.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_STORE_WITHOUT_GROUP_ONE, "", "")
+	storageInfo, err := c.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_STORE_WITHOUT_GROUP_ONE, "", "")
 	if err != nil {
 		return "", err
 	}
@@ -87,18 +124,18 @@ func (this *Client) UploadByBuffer(buffer []byte, fileExtName string) (string, e
 	task.fileInfo = fileInfo
 	task.storagePathIndex = storageInfo.storagePathIndex
 
-	if err := this.doStorage(task, storageInfo); err != nil {
+	if err := c.doStorage(task, storageInfo); err != nil {
 		return "", err
 	}
 	return task.fileId, nil
 }
 
-func (this *Client) DownloadToFile(fileId string, localFilename string, offset int64, downloadBytes int64) error {
+func (c *Client) DownloadToFile(fileId string, localFilename string, offset int64, downloadBytes int64) error {
 	groupName, remoteFilename, err := splitFileId(fileId)
 	if err != nil {
 		return err
 	}
-	storageInfo, err := this.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
+	storageInfo, err := c.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
 	if err != nil {
 		return err
 	}
@@ -113,16 +150,16 @@ func (this *Client) DownloadToFile(fileId string, localFilename string, offset i
 	//res
 	task.localFilename = localFilename
 
-	return this.doStorage(task, storageInfo)
+	return c.doStorage(task, storageInfo)
 }
 
-//deprecated
-func (this *Client) DownloadToBuffer(fileId string, offset int64, downloadBytes int64) ([]byte, error) {
+// DownloadToBuffer deprecated
+func (c *Client) DownloadToBuffer(fileId string, offset int64, downloadBytes int64) ([]byte, error) {
 	groupName, remoteFilename, err := splitFileId(fileId)
 	if err != nil {
 		return nil, err
 	}
-	storageInfo, err := this.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
+	storageInfo, err := c.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
 	if err != nil {
 		return nil, err
 	}
@@ -135,18 +172,18 @@ func (this *Client) DownloadToBuffer(fileId string, offset int64, downloadBytes 
 	task.downloadBytes = downloadBytes
 
 	//res
-	if err := this.doStorage(task, storageInfo); err != nil {
+	if err := c.doStorage(task, storageInfo); err != nil {
 		return nil, err
 	}
 	return task.buffer, nil
 }
 
-func (this *Client) DownloadToAllocatedBuffer(fileId string, buffer []byte,offset int64, downloadBytes int64) (error) {
+func (c *Client) DownloadToAllocatedBuffer(fileId string, buffer []byte, offset int64, downloadBytes int64) error {
 	groupName, remoteFilename, err := splitFileId(fileId)
 	if err != nil {
 		return err
 	}
-	storageInfo, err := this.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
+	storageInfo, err := c.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
 	if err != nil {
 		return err
 	}
@@ -157,21 +194,21 @@ func (this *Client) DownloadToAllocatedBuffer(fileId string, buffer []byte,offse
 	task.remoteFilename = remoteFilename
 	task.offset = offset
 	task.downloadBytes = downloadBytes
-	task.buffer = buffer					//allocate buffer by user
+	task.buffer = buffer //allocate buffer by user
 
 	//res
-	if err := this.doStorage(task, storageInfo); err != nil {
+	if err := c.doStorage(task, storageInfo); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (this *Client) DeleteFile(fileId string) error {
+func (c *Client) DeleteFile(fileId string) error {
 	groupName, remoteFilename, err := splitFileId(fileId)
 	if err != nil {
 		return err
 	}
-	storageInfo, err := this.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
+	storageInfo, err := c.queryStorageInfoWithTracker(TRACKER_PROTO_CMD_SERVICE_QUERY_FETCH_ONE, groupName, remoteFilename)
 	if err != nil {
 		return err
 	}
@@ -181,16 +218,16 @@ func (this *Client) DeleteFile(fileId string) error {
 	task.groupName = groupName
 	task.remoteFilename = remoteFilename
 
-	return this.doStorage(task, storageInfo)
+	return c.doStorage(task, storageInfo)
 }
 
-func (this *Client) doTracker(task task) error {
-	trackerConn, err := this.getTrackerConn()
+func (c *Client) doTracker(task task) error {
+	trackerConn, err := c.getTrackerConn()
 	if err != nil {
 		return err
 	}
 	defer trackerConn.Close()
-	
+
 	if err := task.SendReq(trackerConn); err != nil {
 		return err
 	}
@@ -201,13 +238,13 @@ func (this *Client) doTracker(task task) error {
 	return nil
 }
 
-func (this *Client) doStorage(task task, storageInfo *storageInfo) error {
-	storageConn, err := this.getStorageConn(storageInfo)
+func (c *Client) doStorage(task task, storageInfo *storageInfo) error {
+	storageConn, err := c.getStorageConn(storageInfo)
 	if err != nil {
 		return err
 	}
 	defer storageConn.Close()
-	
+
 	if err := task.SendReq(storageConn); err != nil {
 		return err
 	}
@@ -218,13 +255,13 @@ func (this *Client) doStorage(task task, storageInfo *storageInfo) error {
 	return nil
 }
 
-func (this *Client) queryStorageInfoWithTracker(cmd int8, groupName string, remoteFilename string) (*storageInfo, error) {
+func (c *Client) queryStorageInfoWithTracker(cmd int8, groupName string, remoteFilename string) (*storageInfo, error) {
 	task := &trackerTask{}
 	task.cmd = cmd
 	task.groupName = groupName
 	task.remoteFilename = remoteFilename
 
-	if err := this.doTracker(task); err != nil {
+	if err := c.doTracker(task); err != nil {
 		return nil, err
 	}
 	return &storageInfo{
@@ -233,11 +270,11 @@ func (this *Client) queryStorageInfoWithTracker(cmd int8, groupName string, remo
 	}, nil
 }
 
-func (this *Client) getTrackerConn() (net.Conn, error) {
+func (c *Client) getTrackerConn() (net.Conn, error) {
 	var trackerConn net.Conn
 	var err error
 	var getOne bool
-	for _, trackerPool := range this.trackerPools {
+	for _, trackerPool := range c.trackerPools {
 		trackerConn, err = trackerPool.get()
 		if err == nil {
 			getOne = true
@@ -253,19 +290,19 @@ func (this *Client) getTrackerConn() (net.Conn, error) {
 	return nil, err
 }
 
-func (this *Client) getStorageConn(storageInfo *storageInfo) (net.Conn, error) {
-	this.storagePoolLock.Lock()
-	storagePool, ok := this.storagePools[storageInfo.addr]
+func (c *Client) getStorageConn(storageInfo *storageInfo) (net.Conn, error) {
+	c.storagePoolLock.Lock()
+	storagePool, ok := c.storagePools[storageInfo.addr]
 	if ok {
-		this.storagePoolLock.Unlock()
+		c.storagePoolLock.Unlock()
 		return storagePool.get()
 	}
-	storagePool, err := newConnPool(storageInfo.addr, this.config.maxConns)
+	storagePool, err := newConnPool(storageInfo.addr, c.config.maxConns)
 	if err != nil {
-		this.storagePoolLock.Unlock()
+		c.storagePoolLock.Unlock()
 		return nil, err
 	}
-	this.storagePools[storageInfo.addr] = storagePool
-	this.storagePoolLock.Unlock()
+	c.storagePools[storageInfo.addr] = storagePool
+	c.storagePoolLock.Unlock()
 	return storagePool.get()
 }

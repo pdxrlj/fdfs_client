@@ -4,14 +4,23 @@ import (
 	"bufio"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
-	"runtime"
 )
 
 type config struct {
 	trackerAddr []string
 	maxConns    int
+}
+
+func defaultConfig() *config {
+	return &config{
+		trackerAddr: []string{
+			"127.0.0.1:22122",
+		},
+		maxConns: 3,
+	}
 }
 
 func newConfig(configName string) (*config, error) {
